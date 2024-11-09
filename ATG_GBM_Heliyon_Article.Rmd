@@ -1,0 +1,1136 @@
+---
+title: "ATG_GBM_Heliyon_Article"
+author: "Ricardo Oliveira"
+date: "2024-11-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Differential gene expression analysis supports dysregulation of mitochondrial activity as a new perspective for glioblastoma’s aggressiveness
+
+
+## The html contains the analyses of processing, filtering, differential expression analysis and also validation.
+
+
+### Here in this html you will find the step-by-step differential expression analysis carried out in this article. I ask that if you have any questions or see a possible error, please contact me. Let's not allow an error to let it happen. Thank you in advance for your cooperation.
+
+#### First of all, I'm going to deal with my tables in .csv and .txt. The low grade glioma (lgg) count tables contain information on the three subtypes of glioma (astrocytomas, oligodendrogliomas and ependymomas), we only want data on astrocytomas, so let's filter only for this type of glioma!
+
+#### - The first step in screening is: which individuals have Astrocytoma (here I've included the three subtypes of Astrocytoma) - perform Unique and then filter with subset.
+
+#### - The second trick to sorting is: the identifications have endings for the primary samples (ID = 01) and for other sites (blood = 10, adjacent tissue = 11). Thus, in this research we will compare primary (tumor) samples from people with astrocytoma against people with glioblastoma, its most severe form.
+
+#### - The third key to screening is: to make our lives easier, we're going to carry out multi-step filtering using clinical information (identification of individuals), for sample information (identification of primary samples) and then remove from the raw LGG counts only the primary samples from people with Astrocytoma.
+
+
+
+## Packages required, if you don't have them please download them
+
+```{r}
+# library packages required
+library(tidyverse)
+library(dplyr)
+library(DESeq2)
+library(annotate)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(ggplot2)
+library(ggforce)
+library(EnhancedVolcano)
+library(cowplot)
+library(clusterProfiler)
+library(ReactomePA)
+library(rstatix)
+library(ggpubr)
+library(svglite)
+
+```
+
+##### let's get started!!!
+
+```{r}
+# Loading clinical data and sample data of low-grade glioma (LGG)
+# Clinical LGG 
+clinical_LGG <- read.delim("~/Artigo_glioblastoma/glioma low grade/clinical.cart.2023-10-17/clinical_LGG.tsv")
+
+# checking the set of information in this data.frmae
+unique(clinical_LGG)
+
+# Sample LGG
+sample_LGG <- read.delim("~/Artigo_glioblastoma/glioma low grade/biospecimen.cart.2023-10-17/sample_LGG.tsv")
+
+# checking the set of information in this data.frmae
+unique(sample_LGG)
+
+# Seeing which diagnoses are possible and which terms fit astrocytoma
+unique(clinical_LGG$primary_diagnosis) 
+
+# mixed subtype may fit in, but may be a bias in our work due to their particularization of possessing characteristics of the other subtypes, we will not include them in this research!
+
+
+# Filter out individuals with “Astrocytoma, anaplastic” or “Astrocytoma, NOS” - GENERAL IDENTIFICATION AT THIS TIME. E.g.: 'TCGA-VM-A8CF', not the identification for the sample!
+clinical_LGG_astrocytoma <- subset(clinical_LGG, primary_diagnosis %in% c("Astrocytoma, anaplastic", "Astrocytoma, NOS"))
+
+# In the second line of clinical_LGG_astrocytoma we have the general ID of the individuals, let's use them as a further filter
+# seing the lines
+clinical_LGG_astrocytoma[1:5,1:5]
+
+# taking the second line
+segunda_linha_clinical <- clinical_LGG_astrocytoma[, 2]  # i will take only the inviduals with astrocytoma as vector for filtering
+
+# The goal is to use the individual's general identifier (case_submitter_id) to select primary tumor samples specifically from astrocytoma cases. First, we identify individuals with astrocytoma based on the clinical_LGG data frame. Next, using these individual identifiers, we filter for astrocytoma (ATG) samples in the sample_LGG data frame. We then focus on samples labeled as primary tumor tissue (those ending in '01' and followed by a letter indicating the specific tissue sample, like 'A'). For individuals with multiple primary tumor samples, we check for duplicates and randomly select a single sample per individual.
+
+# Do the first filtering on the “sample_LGG” file
+subset_sample_LGG <- subset(sample_LGG, case_submitter_id %in% segunda_linha_clinical)
+
+# Now we only have data from samples of people with Astrocytoma (either NOS or anaplastic)
+
+# What type of samples do we have?
+unique(subset_sample_LGG$sample_type)
+
+# We'll just take “Primary Tumor”
+
+# Now filtering only samples that are from the primary tumor of these individuals 
+sampletumor_LGG_astrocytoma <- subset(subset_sample_LGG, sample_type %in% c("Primary Tumor"))
+
+# Checking the presence of the sample type
+unique(sampletumor_LGG_astrocytoma$sample_type)
+
+# Now that we have the primary tumor samples from individuals with Astrocytoma, let's do the filtering for only a sample per individual.
+
+# One of the problems I saw here is that our samples in the counts data.frame are separated by dots (e.g. TCGA.TQ.A7RQ.01A) and not by bars as in the sample identification table (e.g. TCGA-VM-A8CF-01A).
+
+# Replace “-” with “.” in the fifth column of sampletumor_LGG_astrocytoma (this is the column with the id of the samples that are in the data.frame of astrocytoma counts)
+sampletumor_LGG_astrocytoma$sample_submitter_id <- gsub("-", ".", sampletumor_LGG_astrocytoma$sample_submitter_id)
+
+# Checking
+head(sampletumor_LGG_astrocytoma$sample_submitter_id, 5)
+
+unique(sampletumor_LGG_astrocytoma$case_submitter_id) #194 individuals 
+
+# HERE WE WILL PERFORM THE FUNCTIONS TO ASSEMBLE THE MATRIX OF COUNTS OF THE ASTROCYTOMA SAMPLES ONLY
+
+# Loading the data.frame of glioma counts
+glioma_counts <- read.delim("~/Artigo_glioblastoma/glioma low grade/glioma_counts.txt") # The data.frame of low-grade glioma counts was downloaded from the indication of a new cohort on https://portal.gdc.cancer.gov/projects/TCGA-LGG, from which the STAR counts files in .txt were downloaded for each of the samples, the unstraded columns were chosen according to the GDC workflow (available at: https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/Expression_mRNA_Pipeline/) for each of the samples, then the gene_id, gene_name and gene_type information was aligned. This created the LGG-TCGA counts matrix.
+
+# Select the corresponding individuals in glioma_counts, ignoring the first three columns
+colunas_selecionadas <- intersect(colnames(glioma_counts)[4:length(colnames(glioma_counts))], sampletumor_LGG_astrocytoma$sample_submitter_id)
+
+colunas_selecionadas <- c(colunas_selecionadas, colnames(glioma_counts)[1:3])  # Incluir as três primeiras colunas 
+
+# Now the final filtering with only the 194 individuals with astrocytoma
+glioma_counts_selecionado <- glioma_counts[, colunas_selecionadas, drop = FALSE]
+
+# Let's add the gene information from each row to the first positions
+astrocytoma_counts_final <- glioma_counts_selecionado %>%
+  select(tail(names(.), 3), everything())
+
+# Now, the last three columns have been moved to the beginning of the data frame
+
+# I transformed the identifiers of 'sample_submitter_id' into vectors in order to be able to filter only the Astrocytoma samples in 'glioma_counts'. The point is that this column doesn't have the terms gene_id, gene_name and gene_type, so I need to add them afterwards
+
+```
+
+
+### Working with Glioblastoma - GBM samples.
+
+
+```{r}
+# Loading clinical data and sample data of high-grade glioma - Glioblastoma (GBM)
+# Clinical GBM
+clinical_GBM <- read.delim("~/Artigo_glioblastoma/Glioblastoma/clinical.cart.2023-10-17/clinical_GBM.tsv")
+
+# Seeing which diagnoses are possible and which terms fit Glioblastoma (GBM)
+unique(clinical_GBM$primary_diagnosis) # there is no sample other than glioblastoma
+
+# Open the file of downloaded glioblastoma samples and their respective information
+gdc_sample_sheet.2023.10.17 <- read.delim("~/Mestrado_Rstudio_org/Artigo_glioblastoma/Glioblastoma/gdc_sample_sheet.2023-10-17.tsv")
+
+# Viewing information
+head(gdc_sample_sheet.2023.10.17, 3)
+
+# Samples of primary glioblastoma tumor only
+samplesheet_GBM <- subset(gdc_sample_sheet.2023.10.17, Sample.Type %in% c("Primary Tumor"))
+
+unique(samplesheet_GBM$Case.ID)
+
+# Count occurrences of each Case ID
+contagem <- table(samplesheet_GBM$Case.ID)
+
+# Check if there are any occurrences greater than 1 (i.e. repetition)
+repetido <- contagem[contagem > 1]
+
+# Print which identifiers are repeated, if any
+if(length(repetido) > 0) {
+  print("The following Case IDs are repeated:")
+  print(names(repetido))
+} else {
+  print("There are no repeated Case IDs.")
+}
+
+# Removing repetitions/duplications
+samplesheet_GBM_sem_duplicatas <- subset(samplesheet_GBM, !duplicated(Case.ID))
+
+# Check the number of rows after removing duplicates
+print(paste("Number of rows after removing duplicates:", nrow(samplesheet_GBM_sem_duplicatas)))
+
+# Transforming the '-' to '.' as it is in the header in glioblastoma.counts
+samplesheet_GBM_sem_duplicatas$Sample.ID <- gsub("-", ".", samplesheet_GBM_sem_duplicatas$Sample.ID)
+
+
+# NOW LET'S REMOVE THE REPETITIONS FROM THE GLIOBLASTOMA COUNTS DATA.FRAME
+# Loading and uploading the Glioblastoma Counts
+glioblastoma_counts <- read.delim("~/Mestrado_Rstudio_org/Artigo_glioblastoma/Glioblastoma/glioblastoma_counts.txt") # The data.frame of glioblastoma counts was downloaded from the indication of a new cohort on https://portal.gdc.cancer.gov/projects/TCGA-GBM, from which the STAR counts files in .txt were downloaded for each of the samples, the unstraded columns were chosen according to the GDC workflow (available at: https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/Expression_mRNA_Pipeline/) for each of the samples, then the gene_id, gene_name and gene_type information was aligned. This created the GBM-TCGA counts matrix.
+
+# Select the corresponding individuals in glioblastoma_counts, ignoring the first three columns
+colunas_selecionadas_GBM <- intersect(colnames(glioblastoma_counts)[4:length(colnames(glioblastoma_counts))], samplesheet_GBM_sem_duplicatas$Sample.ID)
+
+colunas_selecionadas_GBM <- c(colunas_selecionadas_GBM, colnames(glioblastoma_counts)[1:3])  # Include the first three columns 
+
+
+# Now the final filtering with only the 155 individuals with glioblastoma
+glioblastoma_counts_selecionado <- glioblastoma_counts[, colunas_selecionadas_GBM, drop = FALSE]
+
+
+# Let's add the information of the genes of each line to the first positions
+glioblastoma_counts_selecionado <- glioblastoma_counts_selecionado %>%
+  select(tail(names(.), 3), everything())
+
+
+```
+
+
+## GENE EXPRESSION ANALYSIS OF ASTROCYTOMA AND GLIOBLASTOMA DATA
+
+
+### THE FIRST STEP IS TO CLEAN UP OUR GENES, ONCE AGAIN PROCESSING THE DATA.FRAMES
+
+
+#### - General point here: as we're going to carry out multiple tests, we're going to reduce our differential analysis to just the genes that code for proteins, we're only going to work with them. This decreases the chances of type 1 and type 2 statistical errors, and helps to keep our log2foldchange score as correct as possible.
+
+
+```{r}
+# Checking the types of coding genes present in the TCGA
+unique(glioblastoma_counts_selecionado$gene_type)
+
+unique(astrocytoma_counts_final$gene_type)
+
+# We'll only be working with data on genes that encode proteins, so we'll be filtering in both counts databases
+
+# filtering astrocytoma
+astrocytoma_protein_filter <- subset(astrocytoma_counts_final, gene_type %in% c("protein_coding"))
+
+# filtering glioblastoma
+glioblastoma_protein_filter <- subset(glioblastoma_counts_selecionado, gene_type %in% c("protein_coding"))
+
+# Let's process our data.frames now in order to continue with the analysis
+
+# Removing the third column of the data.frame 'astrocytoma_protein_filter' because WE USED the ensembl_id to check for the presence of differentially expressed genes
+
+# Removing the second and third columns from the data.frame 'astrocytoma_protein_filter'
+astrocytoma_counts <- astrocytoma_protein_filter[, -c(2, 3)]
+
+# Removing the first three columns of the data.frame 'glioblastoma_protein_filter', as they are already present in astrocytoma counts
+blastoma_counts <- glioblastoma_protein_filter[, -c(1,2,3)]
+
+# Combining or joining the two data.frame lines
+rnaseq_astroeblasto <- cbind(astrocytoma_counts, blastoma_counts)
+
+
+# astrocytoma_counts this is our final table that will be used
+
+```
+
+
+# DIFFERENTIAL EXPRESSION ANALYSIS OF GENES IN GENERAL FOR SUBSEQUENT FILTERING OF NUCLEAR GENES WITH MITOCHONDRIAL FUNCTION
+
+#### - Here we need to create our condition, which in this case is who the pattern is (Astrocytoma in this case) and what Glioblastoma differs in expression from it. In this case, we need to create the condition in order to carry out the analysis. So, let's create the condition (samples belonging) and then use the deseq2 package for the analysis.
+
+
+```{r}
+# Creating a vector of samples
+
+names_vector <- names(rnaseq_astroeblasto[1, ])
+
+# Definir o número de amostras "astrocytoma" e "glioblastoma" (no caso coloquei 195 pois a primeira coluna ainda tem a indetificação em ensembl_id/gene_id que irei retirar posteriormente, então lembre-se sempre de dar uma olhada)
+
+# Define the number of “astrocytoma” and “glioblastoma” samples (in this case I've put 195 because the first column still has the ensembl_id/gene_id indetification which I'll remove later, so always remember to take a look)
+
+num_Astrocytoma <- 195 # remembering that there are 194 samples of people with Astrocytoma as indicated above
+num_Glioblastoma <- 155 # there is only what the primary tissue as well as the Astrocytoma (remembering that there is no gene_id column here, so we consider the normal value)
+
+# Create a column indicating “case” - for Glioblastoma, and “normal” - in the case of Astrocytoma, to make it clear which will be the reference in our research.
+normal_caso <- c(rep("Astrocytoma", num_Astrocytoma), rep("Glioblastoma", num_Glioblastoma))
+
+# Create the data.frame of our colData
+dadosamostras <- data.frame(amostra = names_vector, condicao = normal_caso)
+
+head(dadosamostras)
+
+# Removing the first line with the gene_id
+dadosamostras <- dadosamostras[-1, ]
+
+head(dadosamostras)
+
+# Select the first 194 rows of the 'dadosamostras' data frame for analysis
+visu_do_visu <- dadosamostras[1:194,]
+
+# Create a 'samples' column in 'visu_do_visu' by copying values from the 'amostra' column
+visu_do_visu$samples <- visu_do_visu$amostra
+
+# Modify the 'samples' column to retain only the first 12 characters for each entry
+visu_do_visu$samples <- substr(visu_do_visu$samples, 1, 12)
+
+# Identify duplicate values in 'samples' to detect potential duplications in Astrocytoma samples
+duplicated_samples <- visu_do_visu$samples[duplicated(visu_do_visu$samples)]
+
+# Display a unique list of duplicated sample identifiers
+print(duplicated_samples)
+
+# Saving who my samples are, for anyone who wants to save them on their pc, etc.
+write.table(dadosamostras, "amostragem.txt", sep = "\t", qmethod = "double", quote = FALSE)
+
+# PERFORMING DIFFERENTIAL GENE CO-EXPRESSION ANALYSIS
+
+# Before carrying out gene expression ATTENTION, you need to specify who you want the reference to be, normally DESeq reads as the reference in alphabetical order, so if you use normal to specify the reference and case to show who you want to see if there are differentially expressed genes, as DESeq visualizes in alphabetical order who the reference would be, then it will take Case as the reference condition, since it starts with the letter C, while Normal with N which comes right after the letter C.
+
+# That's why I'm going to force my R to understand that my reference point is the Astrocytoma.
+dadosamostras$condicao <- as.factor(dadosamostras$condicao)
+dadosamostras$condicao <- relevel(dadosamostras$condicao, ref = "Astrocytoma")
+
+
+# Create DESeqDataSet and perform the differential expression
+exp_astroeblasto <- DESeqDataSetFromMatrix(countData = rnaseq_astroeblasto,
+                                              colData = dadosamostras,
+                                              design = ~condicao, tidy = TRUE) # tidy equals true to indicate that the first column contains genes and not gene expression data
+
+
+# Normalizing my results, performing differential expression analysis and outputting the results
+deseq_antroeblasto <- DESeq(exp_astroeblasto)
+
+# By filtering out very low counts and possible expression errors, this can be a bias and jeopardize the notion of differentially expressed genes.
+
+# FILTER COUNTS AND GROUPS
+smallestGroupSize <- 10 # aonly for genes with groups of more than 10 individuals
+keep <- rowSums(counts(deseq_antroeblasto) >= 10) >= smallestGroupSize # only genes with more than 10 counts per person
+deseq_antroeblasto <- deseq_antroeblasto[keep,]
+
+# Getting my results
+resultado_artigo_all <- results(deseq_antroeblasto)
+
+head(resultado_artigo_all)
+
+# Assemble the table of my GENERAL analysis
+# Transform the result object into an ASTROCYTOMA AND GLIOBLASTOMA data.frame
+
+res_artigo_df <- as.data.frame(resultado_artigo_all)
+
+head(res_artigo_df)
+
+# NOW ONCE AGAIN WE'RE GOING TO TINKER WITH OUR DATA.FRAME, BUT WE'RE GOING TO CHANGE THE GENES THAT ARE IN ENSEMBL TO GENE_NAME FOR BETTER VISUALIZATION AND UNDERSTANDING.
+
+# Change the ensembl to gene_name
+
+# Placing the ensembl in a column that can be worked with
+res_artigo_df$ensembl <- row.names(res_artigo_df)
+
+# Removing the identification that comes after the name of the ensembl which is basically the version that comes with that ensembl
+res_artigo_df$ensembl <- sub("\\..*", "", res_artigo_df$ensembl)
+
+
+# CHANGING ENSEMBL TO GENENAME AND ENTREZID
+res_artigo_geral <- res_artigo_df %>%
+  as.data.frame() %>%
+  mutate(res_artigo_df, entrez_id = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                                                     keys= res_artigo_df$ensembl,
+                                                                     column="ENTREZID",
+                                                                     keytype="ENSEMBL",
+                                                                     multiVals="first"),
+         gene_name = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                        keys=res_artigo_df$ensembl,
+                                        column="SYMBOL",
+                                        keytype="ENSEMBL",
+                                        multiVals="first"))
+
+# 'res_artigo_geral' is our data.frame with our differential expression analysis that will be worked on here.
+```
+
+
+## FILTERING FOR NUCLEAR GENES WITH MITOCHONDRIAL FUNCTION
+
+
+```{r}
+# Loading MitoXplorer 2.0 table
+human_gene_function <- read.delim2("~/Mestrado_Rstudio_org/Artigo_glioblastoma/human_gene_function.txt")
+
+# Wiewing the content
+head(human_gene_function)
+
+# Turning a column into a list - ENSEMBL
+genes_mito <- as.list(human_gene_function$ENSG_ID)
+
+# Converting a list into a vector - ENSEMBL
+genes_mitov <- unlist(genes_mito)
+
+# TAKING ONLY THE EXPRESSION OF SPECIFIC GENES
+
+# The selection is made using the subset function
+artigo_brain_mito <- subset(res_artigo_geral, ensembl %in% genes_mitov)
+
+```
+
+
+### REMOVAL OF MITOCHONDRIAL GENES (GENES THAT ARE EXPRESSED FROM MITOCHONDRIAL DNA)
+
+
+```{r}
+# Filter the dataframe to select the desired rows
+subset_df <- subset(human_gene_function, mito_process %in% c("Oxidative Phosphorylation (mt)", "Translation (MT)"))
+
+# Extract the values from the ENSG_ID column into a list
+genes_mito <- as.list(subset_df$ENSG_ID)
+
+# Convert the list into a vector
+genes_mitov <- unlist(genes_mito)
+
+# Filter the rows that do not contain genes from "Oxidative Phosphorylation (mt)" and "Translation (MT)"
+artigo_brain_mito <- subset(artigo_brain_mito, !(ensembl %in% genes_mitov))
+
+```
+
+# Plotting the data
+
+```{r}
+# VOLCANO PLOT OF MITOCHONDRIAL NUCLEAR GENES
+# Set a p-value threshold to highlight significant genes
+p_value_threshold <- 0.05
+
+# Create the General Volcano Plot with P-value equal to or less than 0.05
+EnhancedVolcano::EnhancedVolcano(artigo_brain_mito,
+                                 lab = artigo_brain_mito$gene_name,
+                                 x = 'log2FoldChange',
+                                 y = 'padj',
+                                 ylim = c(0,200),
+                                 xlim = c(-4,4),
+                                 pCutoff = 0.05,
+                                 FCcutoff = 2,
+                                 pointSize = 4.5,
+                                 labSize = 4.5,
+                                 colCustom = NULL,
+                                 colAlpha = 1,
+                                 legendLabSize = 15,
+                                 legendPosition = 'bottom',
+                                 legendIconSize = 5.0,
+                                 drawConnectors = TRUE,
+                                 widthConnectors = 0.75,
+                                 colConnectors = 'grey50',
+                                 gridlines.major = TRUE,
+                                 gridlines.minor = FALSE,
+                                 border = 'partial',
+                                 borderWidth = 1.5,
+                                 borderColour = 'black',
+                                 title = "",
+                                 subtitle = "")
+
+# MITOCHONDRIAL COWPLOT, MOST DIFFERENTIALLY EXPRESSED GENES
+# Dictionary of correspondence between Ensembl names and gene symbols
+gene_symbols <- c("HMGCS2",
+                  "GK2",
+                  "ETNPPL",
+                  "SLC2A4",
+                  "SLC25A48",
+                  "TERT",
+                  "MCUB",
+                  "CYP27B1",
+                  "ATP5MGL",
+                  "AGXT",
+                  "C15orf48")
+
+genes <- c("ENSG00000134240.12",
+           "ENSG00000196475.6",
+           "ENSG00000164089.9",
+           "ENSG00000181856.15",
+           "ENSG00000145832.14",
+           "ENSG00000164362.21",
+           "ENSG00000005059.16",
+           "ENSG00000111012.10",
+           "ENSG00000249222.1",
+           "ENSG00000172482.5",
+           "ENSG00000166920.13")
+
+letters <- c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K")
+
+# List to store the individual plots
+plots <- list()
+
+
+# Loop to create plots for each gene in the 'genes' vector
+for (i in 1:length(genes)) {
+  
+  # Select the current gene and corresponding letter for annotation
+  gene <- genes[i]
+  letter <- letters[i]
+  
+  # Create a plot for the current gene using DESeq2's plotCounts function
+  plot_FBP2 <- plotCounts(deseq_antroeblasto, 
+                          gene = gene, 
+                          intgroup = "condicao",  # Grouping by 'condicao'
+                          returnData = TRUE)  # Return data for ggplot
+  
+  # Create a ggplot boxplot to visualize the count data
+  p <- ggplot(plot_FBP2, 
+              aes(x = condicao, 
+                  y = count,
+                  fill = condicao)) +
+    geom_boxplot() +  # Add boxplot layer
+    geom_jitter(color="black", size=0.4, alpha=0.9) +  # Add jittered points to show individual data points
+    guides(fill = "none") +  # Remove the legend
+    ylab("Normalized Counts") +  # Y-axis label
+    scale_y_log10() +  # Log-transform the y-axis
+    theme_light() +  # Apply a light theme
+    theme(legend.position = "none") +  # Remove the legend
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +  # Remove grid lines
+    theme(axis.title.x = element_blank()) +  # Remove x-axis title
+    ggtitle(gene) +  # Set the gene name as the plot title
+    theme(plot.title = element_text(size = 12))  # Adjust title size
+  
+  # Create a dictionary to match Ensembl gene names to gene symbols
+  gene_dict <- setNames(gene_symbols, genes)
+  
+  # Update the plot title with the gene symbol instead of Ensembl name
+  p <- p + ggtitle(gene_dict[gene])
+  
+  # Add a letter on the left side of the gene name for annotation
+  p <- p + annotate("text", x = -Inf, y = -Inf, label = letter, hjust = 1, vjust = 0)
+  
+  # Store the plot in a list, using the gene name as the key
+  plots[[gene]] <- p
+}
+
+
+# Combine the graphs using plot_grid
+combined_plots <- plot_grid(plotlist = plots, ncol = 4)
+
+# Display the layout
+print(combined_plots)
+
+```
+
+# GENE ENRICHMENT - GSEA BY THE TERMS GO, KEGG AND REACTOME
+
+````{r}
+# ENRICHMENT 
+# Gene Set Enrichment Analysis
+# Extract the gene names from the second column of the 'artigo_brain_mito' dataframe
+genelist1 <- artigo_brain_mito[, 2]  # In this case, I selected the second column, which contains the log2 fold change values
+
+# Now, I will assign the gene names (from the first column without header, i.e., row names) to the log2 fold change results
+names(genelist1) <- artigo_brain_mito[, 8] %>% as.character()  # Assign gene names from the 8th column
+
+# Now, I will sort the gene list from the highest to the lowest log2 fold change
+genelist1 = sort(genelist1, decreasing = TRUE)
+
+# Display the sorted gene list
+genelist1
+
+# Plot the sorted gene list
+plot(genelist1)
+
+
+### GENE ONTOLOGY - GSEA ##### - ASTROCYTOMA AND GLIOBLASTOMA
+# Biological Process
+artigo_bp_go <- gseGO(genelist1,
+              OrgDb        = org.Hs.eg.db,
+              ont          = "BP",
+              pvalueCutoff = 0.05,
+              pAdjustMethod = "BH",  # Method for adjusting p-values (Benjamini-Hochberg for false discovery rate)
+              verbose      = FALSE)
+
+results_bp_go_gsea <- artigo_bp_go@result
+
+head(results_bp_go_gsea, 10)
+
+# All types of process
+artigo_all_go <- gseGO(genelist1,
+              OrgDb        = org.Hs.eg.db,
+              ont          = "all",
+              minGSSize    = 20,
+              maxGSSize    = 500,
+              pvalueCutoff = 0.05,
+              pAdjustMethod = "BH",  # Method for adjusting p-values (Benjamini-Hochberg for false discovery rate)
+              verbose      = FALSE)
+
+results_bp_all_gsea <- artigo_all_go@result
+
+head(results_bp_all_gsea, 10)
+
+
+## KEGG - GSEA - ARTICLE ASTROCYTOMA AND GLIOBLASTOMA
+
+# Perform KEGG pathway enrichment analysis using 'gseKEGG'
+kkegg_cerebro <- gseKEGG(
+  genelist1,
+  organism = "hsa", 
+  keyType = "ncbi-geneid", 
+  exponent = 1, 
+  eps = 1e-10,  
+  pvalueCutoff = 0.1,  
+  pAdjustMethod = "BH",  # Method for adjusting p-values (Benjamini-Hochberg for false discovery rate)
+  verbose = TRUE,
+  seed = FALSE,  
+  by = "fgsea")
+
+# Display the first few rows of the KEGG pathway analysis result
+head(kkegg_cerebro,10)
+
+# Perform another KEGG pathway enrichment analysis using 'gseMKEGG'
+mkk2 <- gseMKEGG(
+  geneList = genelist1,  
+  organism = 'hsa',  
+  pvalueCutoff = 1)
+
+# Display the first few rows of the alternative KEGG pathway analysis result
+head(mkk2,10)
+
+## REACTOME - ARTICLE  ASTROCYTOMA AND GLIOBLASTOMA
+yy <- ReactomePA::gsePathway(
+  genelist1,
+  organism = "human",
+  exponent = 1,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose = TRUE,
+  seed = FALSE,
+  by = "fgsea")
+
+head(yy,10)
+
+```
+
+# Validation Analysis
+
+## Validation Analysis: Sample Comparison
+
+## Introduction
+
+In this section, we will conduct a validation analysis using data from the Chinese Glioma Genome Atlas (CGGA) and two datasets from the Gene Expression Omnibus (GEO), identified by their IDs GSE196694 and GSE113474. The goal of this analysis is to compare the sampling between the three databases, without applying a differential expression analysis.
+
+## Methodology
+
+### Data Used
+
+- **CGGA**: The Chinese Glioma Genome Atlas is a platform that collects genomic data from Chinese glioma patients, providing a valuable resource for the analysis and validation of biomarkers in this type of cancer.
+
+- **GEO - GSE196694**: This dataset contains samples from the transcriptomic profile of pediatric astrocytoma.
+
+- **GEO - GSE113474**: This dataset includes RNA sequencing samples from high-grade glioblastoma tumors in adults.
+
+### Validation Strategy
+
+For this validation step, we will perform a direct comparison between the samples from the three databases, focusing on the general similarities and differences in gene expression patterns. The approach involves:
+
+- **Data Preparation**: The gene expression data has been properly normalized and transformed to ensure that comparisons between the different datasets are fair and consistent.
+  
+- **Sample Comparison**: We will compare the gene expression profiles between the three datasets, using metrics such as sample correlation, along with visualizations like scatter plots and heatmaps to illustrate the differences or similarities between the samples.
+
+
+# Preparation
+
+```{r}
+# Preprocessing, retrieval of target genes, and data processing
+
+# GSE196694
+GSE196694 <- read.csv("~/Validation/GSE196694_Pediatric_Astrocytoma_raw_countdata (1).csv/GSE196694_Pediatric_Astrocytoma_raw_countdata.csv")
+
+Sup_Table_GSE196694 <- read.delim("~/Validation/GSE196694_Pediatric_Astrocytoma_raw_countdata (1).csv/ijms-23-12696-s001/Supplementary_Table_S1.txt")
+
+# GSE113474
+GSE113474 <- read.csv("~/Validation/GSE113474_counts.raw.csv/GSE113474_counts.raw.csv")
+
+# No clinical data; only tumor/GBM primary tumor sample data
+
+# Checking GSE196694
+GSE196694[1:5,1:5]
+
+# Converting the GSE column to ensembl in GSE196694
+GSE196694 <- GSE196694 %>%
+  as.data.frame() %>%
+  mutate(GSE196694, entrez_id = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                                                     keys= GSE196694$X,
+                                                                     column="ENTREZID",
+                                                                     keytype="ENSEMBL",
+                                                                     multiVals="first"),
+         gene_name = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                        keys=GSE196694$X,
+                                        column="SYMBOL",
+                                        keytype="ENSEMBL",
+                                        multiVals="first"))
+
+# Converting the GSE column to symbol in GSE113474
+GSE113474 <- GSE113474 %>%
+  as.data.frame() %>%
+  mutate(GSE113474, entrez_id = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                                                     keys= GSE113474$X,
+                                                                     column="ENTREZID",
+                                                                     keytype="SYMBOL",
+                                                                     multiVals="first"),
+         gene_name = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                        keys=GSE113474$X,
+                                        column="ENSEMBL",
+                                        keytype="SYMBOL",
+                                        multiVals="first"))
+
+# Retrieving the target genes
+
+# Getting the columns of the target genes from our matrix
+genes <- c("HMGCS2", "GK2", "ETNPPL", "SLC2A4", "SLC25A48", 
+           "TERT", "MCUB", "CYP27B1", "ATP5MGL", "AGXT", "C15orf48")
+
+genes_diferentes <- c("ATP5MGL", "MCUB", "ATP5L2", "CCDC109B")
+
+# Retrieving genes and other forms of them as well
+gene.df <- bitr(genes, fromType = "SYMBOL",
+        toType = c("ENSEMBL", "ENTREZID"),
+        OrgDb = org.Hs.eg.db)
+
+ensembl_d <- gene.df$ENTREZID
+
+ensembl_d
+
+# Mitochondrial genes in GSE196694
+GSE196694_mito <- subset(GSE196694, gene_name %in% genes)
+
+# Mitochondrial genes in GSE113474
+GSE113474_mito <- subset(GSE113474, X %in% genes) # the MCUB and ATP5MGL genes were not present in this database at first, this may indicate that they may not be present in it or are under other names such as MCUB and ATP5MGL can also be identified, we will see this at the end
+
+```
+
+
+# Processing the databases
+
+
+```{r}
+# GSE196694_mito
+unique(Sup_Table_GSE196694$Molecular_classification)
+
+unique(Sup_Table_GSE196694$Sample)
+
+unique(Sup_Table_GSE196694$Pathology)
+
+# Filter the samples that are neither Glioblastoma nor Control
+filtered_samples <- Sup_Table_GSE196694 %>%
+  filter(!Molecular_classification %in% c("Glioblastoma_IDH-wildtype, H3F3A-wildtype") & 
+         !Pathology %in% c("Control"))
+
+filtered_samples <- filtered_samples$Sample
+
+# Checking
+filtered_samples
+
+# Filter only the columns of the desired samples, keeping the first column with the gene names
+GSE196694_mito <- GSE196694_mito %>%
+  select(gene_name, all_of(filtered_samples))
+
+# Checking the data.frame GSE196694_mito
+summary(GSE196694_mito)
+
+# GSE113474_mito
+# Checking the data.frame GSE113474_mito
+summary(GSE113474_mito)
+
+# filtering collum without information
+GSE113474_mito <- GSE113474_mito[,-c(26:34)]
+
+colnames(GSE113474_mito)[1] <- "gene_name"
+
+# Checking the data.frame GSE113474_mito again
+summary(GSE113474_mito)
+
+# Let's join the common columns
+# Merge the data.frames GSE196694_mito and GSE113474_mito by the gene_name column
+combined_mito <- inner_join(GSE196694_mito, GSE113474_mito, by = "gene_name")
+
+# Set the 'gene_name' column as the row names of the data.frame
+row.names(combined_mito) <- combined_mito$gene_name
+
+# Remove the first column (gene_name) from the data.frame, as it is now set as the row names
+combined_mito <- combined_mito[,-1]
+
+# Transpose the data.frame, turning columns into rows and vice versa
+combined_mito <- t(combined_mito)
+
+# Convert the transposed matrix back to a data.frame
+combined_mito <- as.data.frame(combined_mito)
+
+head(combined_mito) # this is the data.merged from GEO with GSE196694_mito (Astrocytoma) and GSE113474_mito (Glioblastoma)
+
+# Add the 'Condition' column with the first 12 rows being 'Astrocytoma' (GSE196694_mito data) and the next 24 being 'Glioblastoma' (GSE113474_mito data)
+combined_mito$Condition <- c(rep("Astrocytoma", 12), rep("Glioblastoma", 24))
+
+# Add Samples collum to
+combined_mito$Samples <- row.names(combined_mito)
+
+head(combined_mito) # this is the data.merged from GEO with GSE196694_mito (Astrocytoma) and GSE113474_mito (Glioblastoma)
+
+```
+
+# CGGA databas
+
+```{r}
+# CGGA data base - mRNAseq_693 identification
+CGGA.mRNAseq_693.Read_Counts.genes.20220620 <- read.delim("C:/Users/ricar/Downloads/Validation/CGGA/CGGA.mRNAseq_693.Read_Counts-genes.20220620.txt (1)/CGGA.mRNAseq_693.Read_Counts-genes.20220620.txt")
+
+# Filtering this data
+CGGA.mRNAseq_693.Read_Counts.genes.20220620 <- subset(CGGA.mRNAseq_693.Read_Counts.genes.20220620, gene_name %in% genes)
+
+# Clinical data for these samples
+CGGA.mRNAseq_693_clinical.20200506 <- read.delim("C:/Users/ricar/Downloads/Validation/CGGA/CGGA.mRNAseq_693_clinical.20200506.txt (1)/CGGA.mRNAseq_693_clinical.20200506.txt")
+
+# Checking the samples of CGGA
+unique(CGGA.mRNAseq_693_clinical.20200506)
+
+# Checking the sample type
+unique(CGGA.mRNAseq_693_clinical.20200506$Histology)
+
+# Information
+# Filtering the samples for GBM
+gbm_samples <- CGGA.mRNAseq_693_clinical.20200506$CGGA_ID[CGGA.mRNAseq_693_clinical.20200506$Histology %in% c("GBM", "rGBM")]
+
+# Filtering the count matrix
+gbm_counts <- CGGA.mRNAseq_693.Read_Counts.genes.20220620[, colnames(CGGA.mRNAseq_693.Read_Counts.genes.20220620) %in% gbm_samples]
+
+# Filtering the samples for Astrocytoma
+astrocytoma_samples <- CGGA.mRNAseq_693_clinical.20200506$CGGA_ID[CGGA.mRNAseq_693_clinical.20200506$Histology %in% c("A", "OA", "AOA", "AA", "rAA", "rA", "rAOA")]
+
+# Filtering the count matrix
+astrocytoma_counts <- CGGA.mRNAseq_693.Read_Counts.genes.20220620[, colnames(CGGA.mRNAseq_693.Read_Counts.genes.20220620) %in% astrocytoma_samples]
+
+# Displaying the results
+row.names(gbm_counts) <- CGGA.mRNAseq_693.Read_Counts.genes.20220620$gene_name
+
+# Displaying the results
+row.names(astrocytoma_counts) <- CGGA.mRNAseq_693.Read_Counts.genes.20220620$gene_name
+
+# Transposing the matrices
+gbm_counts <- t(gbm_counts)
+
+gbm_counts <- as.data.frame(gbm_counts)
+
+# Seeing the numbers of samples of GBM
+length(gbm_counts$AGXT)
+
+astrocytoma_counts <- t(astrocytoma_counts)
+
+astrocytoma_counts <- as.data.frame(astrocytoma_counts)
+
+# Seeing the numbers of samples of Astrocytoma
+length(astrocytoma_counts$AGXT)
+
+# Merging by rows
+combined_cgga <- rbind(astrocytoma_counts, gbm_counts)
+
+# Adding the 'Condition' column with the first 300 rows labeled as 'Astrocytoma' and the next 249 as 'Glioblastoma'
+combined_cgga$Condition <- c(rep("Astrocytoma", 300), rep("Glioblastoma", 249))
+
+# Adding samples
+combined_cgga$Samples <- row.names(combined_cgga)
+
+head(combined_cgga) # this is the data.merged from The Chinese Glioma Genome Atlas, using Astrocytoma and GBM data
+
+```
+
+# Getting genes with different identifiers
+
+```{r}
+# different identifiers
+genes_diferentes <- c("ATP5MGL", "MCUB", "ATP5L2", "CCDC109B") # MCUB is also called CCDC109B, and ATP5MGL is also called ATP5L2 based of data. https://www.ncbi.nlm.nih.gov/gene/55013 for MCUB and https://www.ncbi.nlm.nih.gov/gene/267020 for ATP5MGL.
+
+# CGGA data base
+CGGA.mRNAseq_693.Read_Counts.genes.20220620 <- read.delim("C:/Users/ricar/Downloads/Validation/CGGA/CGGA.mRNAseq_693.Read_Counts-genes.20220620.txt (1)/CGGA.mRNAseq_693.Read_Counts-genes.20220620.txt")
+
+# Filtering this data
+CGGA.mRNAseq_693.Read_Counts.genes.20220620 <- subset(CGGA.mRNAseq_693.Read_Counts.genes.20220620, gene_name %in% genes_diferentes)
+
+# Clinical data for these samples
+CGGA.mRNAseq_693_clinical.20200506 <- read.delim("C:/Users/ricar/Downloads/Validation/CGGA/CGGA.mRNAseq_693_clinical.20200506.txt (1)/CGGA.mRNAseq_693_clinical.20200506.txt")
+
+# Information
+# Filtering the samples for GBM
+gbm_samples <- CGGA.mRNAseq_693_clinical.20200506$CGGA_ID[CGGA.mRNAseq_693_clinical.20200506$Histology %in% c("GBM", "rGBM")]
+
+# Filtering the count matrix
+gbm_counts <- CGGA.mRNAseq_693.Read_Counts.genes.20220620[, colnames(CGGA.mRNAseq_693.Read_Counts.genes.20220620) %in% gbm_samples]
+
+# Filtering the samples for Astrocytoma
+astrocytoma_samples <- CGGA.mRNAseq_693_clinical.20200506$CGGA_ID[CGGA.mRNAseq_693_clinical.20200506$Histology %in% c("A", "OA", "AOA", "AA", "rAA", "rA", "rAOA")]
+
+# Filtering the count matrix
+astrocytoma_counts <- CGGA.mRNAseq_693.Read_Counts.genes.20220620[, colnames(CGGA.mRNAseq_693.Read_Counts.genes.20220620) %in% astrocytoma_samples]
+
+# Displaying the results
+row.names(gbm_counts) <- CGGA.mRNAseq_693.Read_Counts.genes.20220620$gene_name
+
+# Displaying the results
+row.names(astrocytoma_counts) <- CGGA.mRNAseq_693.Read_Counts.genes.20220620$gene_name
+
+# Transposing the matrices
+gbm_counts <- t(gbm_counts)
+
+gbm_counts <- as.data.frame(gbm_counts)
+
+# Seeing the numbers of samples of GBM
+length(gbm_counts$ATP5L2)
+
+astrocytoma_counts <- t(astrocytoma_counts)
+
+astrocytoma_counts <- as.data.frame(astrocytoma_counts)
+
+# Seeing the numbers of samples of Asstrocytoma
+length(astrocytoma_counts$ATP5L2)
+
+# Adding collums
+combined_cgga_new <- rbind(astrocytoma_counts, gbm_counts)
+
+# Collum of MCUB
+combined_cgga$MCUB <- combined_cgga_new$CCDC109B
+
+# Collum of ATP5MGL
+combined_cgga$ATP5MGL <- combined_cgga_new$ATP5L2
+
+# Checking
+head(combined_cgga)
+
+```
+
+### Now the databases from GEO
+
+```{r}
+# Reserving genes from GSE196694 dataset based on a subset of target genes
+GSE196694_mito_r <- subset(GSE196694_mito, gene_name %in% genes_diferentes)
+
+# Reserving genes from GSE113474 dataset based on the target genes subset
+GSE113474_mito_r <- subset(GSE113474, X %in% genes_diferentes)
+
+# Selecting the first 25 columns from GSE113474_mito_r dataset
+GSE113474_mito_r <- GSE113474_mito_r[,1:25]
+
+# Setting gene names as row names for GSE196694_mito_r
+row.names(GSE196694_mito_r) <- GSE196694_mito_r$gene_name
+
+# Removing the first column (gene names) from GSE196694_mito_r
+GSE196694_mito_r <- GSE196694_mito_r[,-(1)]
+
+# Setting gene names as row names for GSE113474_mito_r
+row.names(GSE113474_mito_r) <- GSE113474_mito_r$X
+
+# Removing the first column (gene names) from GSE113474_mito_r
+GSE113474_mito_r <- GSE113474_mito_r[,-(1)]
+
+# Transposing the matrix GSE196694_mito_r to switch rows and columns
+GSE196694_mito_r <- t(GSE196694_mito_r)
+
+# Converting GSE196694_mito_r to a data frame
+GSE196694_mito_r <- as.data.frame(GSE196694_mito_r)
+
+# Transposing the matrix GSE113474_mito_r to switch rows and columns
+GSE113474_mito_r <- t(GSE113474_mito_r)
+
+# Converting GSE113474_mito_r to a data frame
+GSE113474_mito_r <- as.data.frame(GSE113474_mito_r)
+
+# Replacing missing genes in GSE113474_mito_r by assigning column CCDC109B to MCUB
+GSE113474_mito_r$MCUB <- GSE113474_mito_r$CCDC109B
+
+# Replacing missing genes in GSE113474_mito_r by assigning column ATP5L2 to ATP5MGL
+GSE113474_mito_r$ATP5MGL <- GSE113474_mito_r$ATP5L2
+
+# Removing columns 1 and 2 from GSE113474_mito_r as they are no longer needed
+GSE113474_mito_r <- GSE113474_mito_r[,-c(1,2)]
+
+# Combining the data frames GSE196694_mito_r and GSE113474_mito_r row-wise
+gse_faltantes <- rbind(GSE196694_mito_r, GSE113474_mito_r)
+
+head(gse_faltantes)
+
+# Putting the missing genes in combined_mito data.frame
+combined_mito$MCUB <- gse_faltantes$MCUB
+
+combined_mito$ATP5MGL <- gse_faltantes$ATP5MGL
+
+# Checking
+head(combined_mito)
+
+```
+
+## Based on this data preparation, a Wilcoxon test analysis was conducted to compare the gene expression levels between astrocytoma and glioblastoma samples. This non-parametric test allowed for the assessment of statistically significant differences in expression between the two groups, providing insights into the differential gene activity associated with each condition.
+
+```{r}
+# Inserting into a new variable so as not to intervene in the raw data
+ccga <- combined_cgga
+gse <- combined_mito
+
+# Checking
+head(ccga)
+head(gse)
+
+# Reordering columns so that 'Condition' and 'Samples' are at the end
+ccga <- ccga %>%
+  select(-Condition, -Samples, Condition, Samples)
+
+gse <- gse %>%
+  select(-Condition, -Samples, Condition, Samples)
+
+# Checking the first few rows to confirm the order of the columns
+head(ccga)
+head(gse)
+
+# normalizing the zero
+ccga[ccga == 0] <- 1
+
+gse[gse == 0] <- 1
+
+# Normalizing
+appl <- function(df) {
+  df %>%
+    mutate(across(where(is.numeric), ~log2(.))) %>%  # Apply log2 transformation to numeric columns
+    mutate(across(tail(names(df), 2), as.factor))    # Keep the last 2 columns as factors (categorical variables)
+}
+
+# Applying normalization function to the datasets
+ccga.norm <- appl(ccga) 
+gse.norm <- appl(gse)
+
+# Setting row names for 'ccga.norm' to 'Samples'
+# Reset row names to ensure `ccga.norm` has no row names before using `column_to_rownames()`
+rownames(ccga.norm) <- NULL
+
+# Now apply `column_to_rownames()` to set "Samples" as the row names
+ccga.norm <- ccga.norm %>%
+  column_to_rownames(var = "Samples")
+
+# Sorting columns by name in ascending order
+ccga.norm <- ccga.norm %>%
+  select(order(colnames(ccga.norm)))
+
+# Reset row names to ensure `gse.norm` has no row names before using `column_to_rownames()`
+rownames(gse.norm) <- NULL
+
+# Now apply `column_to_rownames()` to set "Samples" as the row names
+gse.norm <- gse.norm %>%
+  column_to_rownames(var = "Samples")
+
+# Sorting columns by name in ascending order
+gse.norm <- gse.norm %>%
+  select(order(colnames(gse.norm)))
+
+# Adding classification columns to indicate the data origin
+ccga.norm$Origem <- "CGGA"
+gse.norm$Origem <- "GSE"
+
+# Converting gene columns to numeric for consistency
+ccga.norm$SLC2A4 <- as.numeric(ccga.norm$SLC2A4)
+gse.norm$SLC2A4 <- as.numeric(gse.norm$SLC2A4)
+ccga.norm$ATP5MGL <- as.numeric(ccga.norm$ATP5MGL)
+gse.norm$ATP5MGL <- as.numeric(gse.norm$ATP5MGL)
+
+# Combining both normalized datasets into a single dataframe
+df_comb <- bind_rows(ccga.norm, gse.norm)
+
+# Reshaping data to long format, excluding the last two columns (classifiers)
+df_long <- df_comb %>%
+  pivot_longer(
+    cols = -c(Condition, Origem),  # Keep 'Condition' and 'Origem' as identifier columns
+    names_to = "Genes", 
+    values_to = "Value"
+  )
+
+# Generating a joint boxplot comparing 'Astrocytoma' and 'Glioblastoma'
+comparisons <- list(c("Astrocytoma", "Glioblastoma"), c("Glioblastoma", "Astrocytoma"))
+
+ggboxplot(
+  df_long, x = "Origem", y = "Value", 
+  fill = "Condition", 
+  facet.by = "Genes",
+  palette = "jco") +
+  stat_compare_means(method = "wilcox.test", 
+                     comparisons = comparisons, 
+                     label = "p.signif", 
+                     label.y = 24) + 
+  xlab("") +
+  ylab("")
+
+# Separate boxplots for CGGA and GSE datasets
+
+# Reshaping CGGA data to long format
+ccga.long <- ccga.norm %>%
+  pivot_longer(
+    cols = -c(Condition, Origem),  # Keep 'Condition' and 'Origem' as identifiers
+    names_to = "Genes", 
+    values_to = "Value"
+  )
+
+# Reshaping GSE data to long format
+gse.long <- gse.norm %>%
+  pivot_longer(
+    cols = -c(Condition, Origem),  # Keep 'Condition' and 'Origem' as identifiers
+    names_to = "Genes", 
+    values_to = "Value"
+  )
+
+# Creating a boxplot for CGGA dataset
+cgga_plot <- ggboxplot(
+  ccga.long, x = "Condition", y = "Value", 
+  fill = "Condition", 
+  facet.by = "Genes",
+  palette = "jco") +
+  stat_compare_means(method = "wilcox.test", 
+                     label.y = 15,
+                     comparisons = comparisons, 
+                     size = 6) + 
+  xlab("") +
+  ylab("") + 
+  theme(
+    text = element_text(size = 20),             # General text size
+    axis.title = element_text(size = 22),       # Axis labels size
+    axis.text = element_text(size = 18),        # Axis values text size
+    strip.text = element_text(size = 20)        # Facet labels (gene names) text size
+  )
+
+print(cgga_plot)
+
+# Saving CGGA plot as SVG
+ggsave("cgga.svg", height = 19, width = 18, dpi = 600)
+
+# Creating a boxplot for GSE dataset
+gse_plot <- ggboxplot(
+  gse.long, x = "Condition", y = "Value", 
+  fill = "Condition", 
+  facet.by = "Genes",
+  palette = "jco") +
+  stat_compare_means(method = "wilcox.test", 
+                     label.y = 12,
+                     comparisons = comparisons, 
+                     size = 6) + 
+  xlab("") +
+  ylab("") + 
+  theme(
+    text = element_text(size = 20),             # General text size
+    axis.title = element_text(size = 22),       # Axis labels size
+    axis.text = element_text(size = 18),        # Axis values text size
+    strip.text = element_text(size = 20)        # Facet labels (gene names) text size
+  )
+
+print(gse_plot)
+
+# Saving GSE plot as SVG
+ggsave("gse.svg", height = 19, width = 18, dpi = 600)
+
+# Arranging the CGGA and GSE boxplots into a single plot
+p <- plot_grid(cgga_plot, gse_plot, ncol = 2, labels = LETTERS[1:2])
+
+# Saving the combined plot as PNG
+ggsave("combined_plot.svg", height = 22, width = 30)
+
+```
